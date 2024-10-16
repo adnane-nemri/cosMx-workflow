@@ -1,0 +1,697 @@
+---
+title: "P. chabaudi cosmx"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+```
+
+```{r}
+nano.obj <- readRDS("~/P.chabaudi/SeuratObject_CosMx_export/seuratObject.RDS")
+
+nano.obj@meta.data$slide_name[nano.obj@meta.data$Run_Tissue_name == "ThomasOtto Mouse Slide 1 06/03/24"] <- "TOM1"
+nano.obj@meta.data$slide_name[nano.obj@meta.data$Run_Tissue_name == "ThomasOtto Mouse Slide 2 06/03/24"] <- "TOM2"
+#sanity check
+table(nano.obj$Run_Tissue_name, nano.obj$slide_name)
+#change name of FOVs to make them slide-specific
+nano.obj$slide_fov <- paste0(nano.obj$slide_name,"_",nano.obj$fov)
+
+# Assign cells/FOvs to tissue, timepoints, individual
+# the .tsv used for this had to be manually constructed after visual inspection of the Fovs on the slides
+fovmap <- read.csv("~/P.chabaudi/FOV_mapping_corrected.tsv", sep="\t")
+nano.obj[[]] <- left_join(nano.obj[[]], fovmap, by="slide_fov")
+nano.obj[[]]
+
+spleenobj <- subset(nano.obj, subset = tissue == "spleen")
+spleenobj
+# split the RNA measurements into separate layers for the different timepoints
+spleenobj[["RNA"]] <- split(spleenobj[["RNA"]], f = spleenobj$time_point)
+spleenobj
+```
+
+QC
+```{r}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+#spleenobj[["percent.Negative"]] <- PercentageFeatureSet(spleenobj, pattern = "^Negative-")
+# Visualize QC metrics as a violin plot
+VlnPlot(spleenobj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, split.by = "time_point", raster=FALSE, pt.size=0 )
+spleenobj <- subset(spleenobj, subset = nFeature_RNA > 10 & nFeature_RNA < 250 &
+                      nCount_RNA > 10 &  nCount_RNA < 500 )
+spleenobj
+VlnPlot(spleenobj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, split.by = "time_point", raster=FALSE, pt.size=0 )
+```
+
+Select FOVs for each time point
+```{r}
+# replace 203 for 143 in TP1
+fovs_to_s_TP_N1_m2_spleen <- c("TOM1_174", "TOM1_175", "TOM1_176", "TOM1_177", "TOM1_181", "TOM1_182", "TOM1_183", "TOM1_189", "TOM1_190", "TOM1_196", "TOM1_197", "TOM1_203")
+fovs_to_s_TP_2_m1_spleen <- c("TOM1_67", "TOM1_68", "TOM1_69", "TOM1_78", "TOM1_79", "TOM1_80", "TOM1_89", "TOM1_90", "TOM1_91", "TOM1_100", "TOM1_101", "TOM1_102")
+fovs_to_s_TP_3_m2_spleen <- c("TOM2_81", "TOM2_82", "TOM2_83", "TOM2_84", "TOM2_85", "TOM2_93", "TOM2_94", "TOM2_95", "TOM2_96", "TOM2_97", "TOM2_104", "TOM2_105")
+fovs_to_s_TP_4_m2_spleen <- c("TOM2_143", "TOM2_144", "TOM2_145", "TOM2_146", "TOM2_147", "TOM2_151", "TOM2_152", "TOM2_161", "TOM2_162", "TOM2_171", "TOM2_172", "TOM2_173")
+fovs_to_s <- c(fovs_to_s_TP_N1_m2_spleen, fovs_to_s_TP_2_m1_spleen, fovs_to_s_TP_3_m2_spleen, fovs_to_s_TP_4_m2_spleen)
+
+splobj.sel <- subset(spleenobj, subset = slide_fov %in% fovs_to_s)
+splobj.sel
+#rm(nano.obj, spleenobj)
+rm(fovs_to_s_TP_N1_m2_spleen, fovs_to_s_TP_2_m1_spleen, fovs_to_s_TP_3_m2_spleen, fovs_to_s_TP_4_m2_spleen, fovs_to_s )
+```
+
+
+
+```{r}
+options(future.globals.maxSize = 3e+09)
+# run sctransform
+splobj.sel <- SCTransform(splobj.sel, vars.to.regress = "nCount_RNA")
+splobj.sel <- RunPCA(splobj.sel)
+#VizDimLoadings(splobj.sel, dims = 1:2, reduction = "pca")
+ElbowPlot(splobj.sel)
+DimHeatmap(splobj.sel, dims = 1:10, cells = 500, balanced = TRUE)
+
+# integrate datasets
+splobj.sel <- IntegrateLayers(object = splobj.sel, method = HarmonyIntegration,
+                              orig.reduction = "pca", new.reduction = "harmony",
+                              normalization.method = "SCT", verbose = TRUE )
+splobj.sel
+splobj.sel <- FindNeighbors(splobj.sel, reduction = "harmony", dims = 1:20)
+splobj.sel <- FindClusters(splobj.sel, resolution = 0.5, cluster.name = "harmony_clusters")
+  #method = "igraph", algorithm = 4   # needs leidenalg mapped
+splobj.sel <- RunUMAP(splobj.sel, dims = 1:20, reduction = "harmony")
+DimPlot(splobj.sel, reduction = "umap", group.by = c("time_point", "harmony_clusters"))
+
+## Collapse individual datasets before performing differential expression analysis
+splobj.sel[["RNA"]] <- JoinLayers(splobj.sel[["RNA"]])
+splobj.sel
+```
+
+
+```{r}
+splobj.sel <- PrepSCTFindMarkers(splobj.sel, assay = "SCT", verbose = TRUE)
+splobj.sel.markers <- FindAllMarkers(splobj.sel, only.pos = TRUE)
+splobj.sel.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+splobj.sel.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 20) %>%
+    ungroup() -> top20
+DoHeatmap(splobj.sel, features = top10$gene) + NoLegend()
+```
+
+
+```{r}
+FeaturePlot(splobj.sel, features = c("Ighg1", "Cd79a", "Cd3e", "Cd3g", "Cd8a" ))
+
+new.cluster.ids <- c(
+  "Others/downregulated", #0
+  "Neutrophils/Other",# 1 : Klrb1, Mmp9
+  "Erythroblasts",# 2 : Hbb,  Hba-a1/2
+  "Marginal zone",# 3 :Hmgb2, Ppia
+  "B cells",# 4: Cd74, Cd37, Cd79a, Ms4a1
+  "B cells",# 5: Igha GOOD
+  "T cells",# 6: Ccl5, Cd3g, Cd3d, Cd3e, Ms4a4b
+  "Macrophages",# 7: Psap, C1qb, C1qa
+  "Plasma cells",# 8: Igkc, Jchain, Hsp90b1, Xbp1, Mzb1
+  "Plasma cells",# 9:Ighm, Igkc, Jchain, Hsp90b1, Xbp1, Mzb1 CLUMPING
+  "Neutrophils",# 10: S100a8, S100a9, Camp =========, Elane, Prtn3, Mpo ========================= what is this
+  "Endothelial cells",# 11: Igfbp7, Vegfa, Bgn
+  "Neutrophils/Stromal cells/Other",# 12: Col6a3
+  "B cells/Granulocytes",# 13: Csk, Cd37, CD79a
+  "Fibroblasts",# 14: Col1a1, Col1a2, Ccl19
+  "Plasma cells",# 15: Slpi, Igkc, Jchain, Hsp90b1, Xbp1, Mzb1
+  "Memory B cells", #16: Ighg1, Ccr5  GOOD
+  "Platelets",# 17: Pf4
+  "Neutrophils2",# 18: Mpo, Elane, Prtn3
+  "Plasma cells",# 19: Ighg1 GOOD
+  "Other",# 20: 
+  "NK cells?", #21
+  "Other/unresolved", # 22: Hba-a1/2
+  "Plasma cells"# 23: igha, Jchain, Igkc GOOD
+)
+
+splobj.sel$celltypes_manual <- new.cluster.ids[as.factor(splobj.sel$harmony_clusters)]
+DimPlot(splobj.sel, reduction = "umap", group.by = c("time_point", "harmony_clusters", "celltypes_manual"), order = levels(splobj.sel), label = TRUE)
+
+```
+
+
+
+
+```{r}
+tp <- "TP_N1"
+qobjtp1 <- subset_opt_mod(splobj.sel, subset = time_point == tp )
+qobjtp1 <- subset(qobjtp1, subset = time_point == tp )
+
+ImageDimPlot(qobjtp1, fov = "ThomasOtto.Mouse.Slide.1.06.03.24", group.by = "celltypes_manual",
+  cells = WhichCells(qobjtp1, expression = celltypes_manual %in% c(
+  "NK cells/Other",
+  "Erythroblasts",
+  "Exhausted CD8+ T cells",
+  #"B cells",
+  #"T cells",
+  "Macrophages")), cols = c("red", "green", "blue", "orange", "yellow", "grey"), size = 0.8,  axes = TRUE, flip_xy = FALSE)
+
+tp <- "TP_2"
+qobjtp2 <- subset_opt_mod(splobj.sel, subset = time_point == tp )
+qobjtp2 <- subset(qobjtp2, subset = time_point == tp )
+
+ImageDimPlot(qobjtp2, fov = "ThomasOtto.Mouse.Slide.1.06.03.24", group.by = "celltypes_manual",
+  cells = WhichCells(qobjtp2, expression = celltypes_manual %in% c(
+  "NK cells/Other",
+  "Erythroblasts",
+  "Exhausted CD8+ T cells",
+  #"B cells",
+  #"T cells",
+  "Macrophages")), cols = c("red", "green", "blue", "orange", "yellow", "grey"), size = 0.8,  axes = TRUE, flip_xy = FALSE)
+
+tp <- "TP_3"
+qobjtp3 <- subset_opt_mod(splobj.sel, subset = time_point == tp )
+qobjtp3 <- subset(qobjtp3, subset = time_point == tp )
+
+ImageDimPlot(qobjtp3, fov = "ThomasOtto.Mouse.Slide.2.06.03.24", group.by = "celltypes_manual",
+  cells = WhichCells(qobjtp3, expression = celltypes_manual %in% c(
+  "NK cells/Other",
+  "Erythroblasts",
+  "Exhausted CD8+ T cells",
+  #"B cells",
+  #"T cells",
+  "Macrophages")), cols = c("red", "green", "blue", "orange", "yellow", "grey"), size = 0.8,  axes = TRUE, flip_xy = FALSE)
+
+tp <- "TP_4"
+qobjtp4 <- subset_opt_mod(splobj.sel, subset = time_point == tp )
+qobjtp4 <- subset(qobjtp4, subset = time_point == tp )
+
+ImageDimPlot(qobjtp4, fov = "ThomasOtto.Mouse.Slide.2.06.03.24", group.by = "celltypes_manual",
+  cells = WhichCells(qobjtp4, expression = celltypes_manual %in% c(
+  "NK cells/Other",
+  "Erythroblasts",
+  "Exhausted CD8+ T cells",
+  #"B cells",
+  #"T cells",
+  "Macrophages")), cols = c("red", "green", "blue", "orange", "yellow", "grey"), size = 0.8,  axes = TRUE, flip_xy = FALSE)
+
+```
+
+```{r}
+
+cellstoshow <- c("Neutrophils/Other", "Plasma cells", "Marginal zone", "Macrophages", "B cells", "T cells")
+colorstoshow <- c("coral", "darkgoldenrod1", "cadetblue1", "chartreuse1", "darkorchid1", "red")
+sizetoshow <- 0.8
+
+plttp1 <- ImageDimPlot(qobjtp1, fov = "ThomasOtto.Mouse.Slide.1.06.03.24", group.by = "celltypes_manual", cells = WhichCells(qobjtp1, expression = celltypes_manual %in% cellstoshow), size = sizetoshow,  axes = TRUE, flip_xy = FALSE) + 
+ggtitle("TP_N1") + scale_fill_manual(breaks = cellstoshow, values =colorstoshow)
+
+plttp2 <- ImageDimPlot(qobjtp2, fov = "ThomasOtto.Mouse.Slide.1.06.03.24", group.by = "celltypes_manual",   cells = WhichCells(qobjtp2, expression = celltypes_manual %in% cellstoshow), size = sizetoshow,  axes = TRUE, flip_xy = FALSE) + 
+ggtitle("TP_2") + scale_fill_manual(breaks = cellstoshow, values = colorstoshow)
+
+plttp3 <- ImageDimPlot(qobjtp3, fov = "ThomasOtto.Mouse.Slide.2.06.03.24", group.by = "celltypes_manual",   cells = WhichCells(qobjtp3, expression = celltypes_manual %in% cellstoshow), size = sizetoshow,  axes = TRUE, flip_xy = FALSE) + 
+ggtitle("TP_3") + scale_fill_manual(breaks = cellstoshow, values = colorstoshow)
+
+plttp4 <- ImageDimPlot(qobjtp4, fov = "ThomasOtto.Mouse.Slide.2.06.03.24", group.by = "celltypes_manual",   cells = WhichCells(qobjtp4, expression = celltypes_manual %in% cellstoshow), size = sizetoshow,  axes = TRUE, flip_xy = FALSE) + 
+ggtitle("TP_4") + scale_fill_manual(breaks = cellstoshow, values = colorstoshow)
+
+plttp1 | plttp2 | plttp3 | plttp4
+
+```
+
+Annotation transfer and niche calculation
+
+```{r}
+#library(SeuratData)
+#library(SeuratDisk)
+#library(anndataR)
+library(spacexr)
+
+#  prepare the query - Done 1 time point at a time because of conflicts in cell positions across slides
+#tom1 <- splobj.sel[["ThomasOtto.Mouse.Slide.1.06.03.24"]]
+#tom2 <- splobj.sel[["ThomasOtto.Mouse.Slide.2.06.03.24"]]
+
+#       TP_2  TP_3  TP_4 TP_N1
+#  TOM1 35926     0     0 21486
+#  TOM2     0 43839 31028     0
+
+
+
+# process the reference
+spleenbm <- readRDS("~/P.chabaudi/chabaudi_combined_finer_cell_types_2024.rds")
+spleenbm <- UpdateSeuratObject(spleenbm)
+spleen.ref <- subset(spleenbm, subset = Tissue == 'spleen')
+table(spleen.ref$cell_types)
+# each cell type must have > 25 cells representing it
+select_ct <- c(names(which(table(spleen.ref$cell_types) > 25)))
+#Idents(spleen.ref) <- \"subclass\" # overwrites ?
+spleen.ref <-  subset(x = spleen.ref, subset = cell_types %in% select_ct)
+spleen.ref$cell_types <- droplevels(spleen.ref$cell_types)
+table(spleen.ref$cell_types)
+cell_types <- as.factor(spleen.ref$cell_types)
+levels(cell_types) <- gsub("/", "-", levels(cell_types))
+names(cell_types) <- colnames(spleen.ref)
+counts <- GetAssayData(spleen.ref, assay = "RNA", slot = "counts")
+nUMI <- spleen.ref$nCount_RNA
+names(nUMI) <- colnames(spleen.ref)
+reference <- Reference(counts, cell_types, nUMI)
+
+# prepare the query
+counts <- GetAssayData(qobjtp2.2, assay = "RNA", layer = "counts")
+nUMI <- colSums(counts)
+coords <- GetTissueCoordinates(qobjtp2.2)
+# does not work out of the box because expects that coords has only 2 columns (x, y) but it has 3 (x, y and cell name)
+# coords must have cell names as rownames
+# 1st make sure the order of the cells in qobjtp2.2 and coords is the same then remove column of cell names in coords
+#> sum(coords['cell'] == Cells(qobjtp2.2))
+#[1] 35926    # all good
+coords2 <- coords[c("x","y")]
+rownames(coords2) <- rownames(qobjtp2.2[[]]) #coords["cell"]
+query <- SpatialRNA(coords2, counts, nUMI)
+
+
+# clean the workspace to save RAM
+rm(spleenbm, spleen.ref, counts, nUMI, coords, select_ct, cell_types)
+# do not remove obj
+
+# run RCTD
+myRCTD <- create.RCTD(query, reference, max_cores = 8, UMI_min = 50, counts_MIN = 5, UMI_min_sigma = 150)
+myRCTD <- run.RCTD(myRCTD, doublet_mode = "doublet" )
+
+
+annotations.df <- myRCTD@results$results_df
+annotations <- annotations.df$first_type
+names(annotations) <- rownames(annotations.df)
+qobjtp2.2$predicted.celltype <- annotations
+
+qobjtp2.2 <- BuildNicheAssay(object = qobjtp2.2, fov = "ThomasOtto.Mouse.Slide.1.06.03.24", group.by = "celltypes_manual", niches.k = 5, neighbors.k = 30)
+
+library(ggplot2)
+celltype.plot <- ImageDimPlot(qobjtp2.2, group.by = "celltypes_manual", size = 0.8, axes = TRUE, flip_xy = FALSE, cols = "polychrome", dark.background = F) + ggtitle("Cell type")
+niche.plot <- ImageDimPlot(qobjtp2.2, group.by = "niches",size = 0.8, axes = TRUE, flip_xy = FALSE, dark.background = F) + ggtitle("Niches") +
+    scale_fill_manual(values = c("#442288", "#6CA2EA", "#B5D33D", "#FED23F", "#EB7D5B"))
+celltype.plot | niche.plot
+
+```
+
+```{r}
+keep.cells <- Cells(obj)[!is.na(obj$predicted.celltype)]
+obj <- subset(obj, cells = keep.cells)
+obj <- BuildNicheAssay(object = obj, fov = \"slide_fov\", group.by = \"predicted.celltype\", niches.k = 5 , neighbors.k = 30)\n",
+
+    "celltype.plot <- ImageDimPlot(obj, group.by = \"predicted.celltype\", size = 1.5, cols = \"polychome\",\n",
+    "    dark.background = F) + ggtitle(\"Cell type\")\n",
+    "niche.plot <- ImageDimPlot(obj, group.by = \"niches\", size = 1.5, dark.background = F) + ggtitle(\"Niches\")\n"
+
+    "# cells on different slides will never be neighbours. (take that 3d nonsense elshewre.)\n",
+    "merge_neighbours <- function (neighbors1, neighbors2) {\n",
+    "  # in the main objects, onlysnn is a Graph object. I wonder if nn is only accidentally not.\n",
+    "  neighbors <- list()\n",
+    "  neighbors$nn <- merge_non_overlapping_sparse_matricies(neighbors1$nn, neighbors2$nn)\n",
+    "  neighbors$snn <- SeuratObject::as.Graph(merge_non_overlapping_sparse_matricies(neighbors1$snn, neighbors2$snn) ) \n",
+    "  return(neighbors)\n",
+    "}\n",
+    "\n",
+    "merge_non_overlapping_sparse_matricies <- function(n1, n2) {\n",
+    "  # I'm fairly sure there's a better  function to do this.\n",
+    "  # N1 + N2 => \n",
+    "  #\n",
+    "  # n1 X\n",
+    "  # X n2\n",
+    "  # \n",
+    "  filler_top_right <- SparseEmptyMatrix(nrow = nrow(n1), ncol = ncol(n2), \n",
+    "                            rownames = rownames(n1), colnames = colnames(n2) )\n",
+    "  filler_bottom_left <- SparseEmptyMatrix(nrow = nrow(n2), ncol = ncol(n1),\n",
+    "                            rownames = rownames(n2), colnames = colnames(n1) )\n",
+    "  n <- rbind( cbind(n1, filler_top_right), cbind(filler_bottom_left, n2))\n",
+    "  return(n)\n",
+    "}\n",
+    "\n",
+    "# Modified version of Seurats BuildNicheAssay that runs acros all fovs at once.\n",
+    "BuildNicheAssay.using_all_fovs <- function(\n",
+    "  object,\n",
+    "  group.by,\n",
+    "  assay = \"niche\",\n",
+    "  neighbors.k = 20,\n",
+    "  niches.k = 4\n",
+    ") {\n",
+    "  \n",
+    "  # empty\n",
+    "  neighbors.all <- list()\n",
+    "  neighbors.all$nn  <- SparseEmptyMatrix(0,0)\n",
+    "  neighbors.all$snn <- SparseEmptyMatrix(0,0)\n",
+    "  \n",
+    "  for (fov in names(object@images)) {\n",
+    "    coords <- GetTissueCoordinates(object[[fov]], which = \"centroids\")\n",
+    "    cells <- coords$cell\n",
+    "  \n",
+    "    rownames(coords) <- cells\n",
+    "    coords <- as.matrix(coords[ , c(\"x\", \"y\")])\n",
+    "    neighbors    <- FindNeighbors(coords, k.param = neighbors.k)\n",
+    "    neighbors$nn <- neighbors$nn[Cells(object[[fov]]), Cells(object[[fov]])]\n",
+    "    \n",
+    "    # Merge with previous\n",
+    "    neighbors.all <- merge_neighbours(neighbors.all, neighbors) \n",
+    "  }\n",
+    "  # rename\n",
+    "  neighbors <- neighbors.all\n",
+    "  \n",
+    "  # Need a list of all those cells, used later.\n",
+    "  # put all cells into one list (being sure order matches network, might not match object order.)\n",
+    "  cells <- colnames(neighbors$nn)\n",
+    "  \n",
+    "  \n",
+    "  # Continuouing on the BuildNicheAssay function\n",
+    "  # build cell x cell type matrix\n",
+    "  ct.mtx <- matrix(\n",
+    "    data = 0,\n",
+    "    nrow = length(cells),\n",
+    "    ncol = length(unlist(unique(object[[group.by]])))\n",
+    "  )\n",
+    "  rownames(ct.mtx) <- cells\n",
+    "  colnames(ct.mtx) <- unique(unlist(object[[group.by]]))\n",
+    "  cts <- object[[group.by]]\n",
+    "  for (i in 1:length(cells)) {\n",
+    "    ct <- as.character(cts[cells[[i]], ])\n",
+    "    ct.mtx[cells[[i]], ct] <- 1\n",
+
+"  # create niche assay\n",
+    "  sum.mtx <- as.matrix(neighbors$nn %*% ct.mtx)\n",
+    "  niche.assay <- CreateAssayObject(counts = t(sum.mtx))\n",
+    "  object[[assay]] <- niche.assay\n",
+    "  DefaultAssay(object) <- assay\n",
+    "  \n",
+    "  \n",
+    "  \n",
+    "  # cluster niches assay\n",
+    "  object <- ScaleData(object)\n",
+    "  results <- kmeans(\n",
+    "    x = t(object[[assay]]@scale.data),\n",
+    "    centers = niches.k,\n",
+    "    nstart = 30\n",
+    "  )\n",
+    "  object$niches <- results[[\"cluster\"]]\n",
+    "  \n",
+    "  return(object)\n",
+
+   "source": [
+    "save(list = c(\"query\", \"reference\"), file = \"RCTD_input.Rdata\")\n",
+    "load(\"RCTD_input.Rdata\")\n",
+    "    "
+
+
+```
+
+```{r}
+# from https://github.com/alikhuseynov/add-on_R/blob/develop/R/subset_obj_seurat_v2.R?ref=https://githubhelp.com
+
+NULL
+
+# TODO:
+  # - edit args
+
+#' Intermediate solution to \code{subset()}:
+#' subset FOVs/centroids if selected cells are NOT found in each FOV
+#' NOTE: some code parts and args are taken from SeuratObject
+
+#' Function params/args:
+#' @param object An S4 object or A \code{FOV} object
+#' @param subset Logical expression indicating features/variables to keep
+#' @param cells A vector of cells to keep; if \code{NULL}, defaults to all cells
+#' @param idents A vector of identity classes to keep
+#' @param Update.slots If to update slots of an object
+#' @param Update.object If to update final object, default to TRUE.
+#' @param ... Arguments passed to \code{subset()} and other methods
+
+
+subset_opt_mod <- function(
+    object = NULL, 
+    subset = NULL, 
+    cells = NULL, 
+    idents = NULL,
+    features = NULL,
+    Update.slots = TRUE,
+    Update.object = TRUE,
+    ...)
+{
+  
+  if (Update.slots) { 
+    message("Updating object slots..")
+     UpdateSlots(object)
+  }
+  
+  message("Cloing object..")
+  obj_subset <- object
+  
+  # sanity check - use only cell ids (no indices)
+  if (all(is.integer(cells))) { 
+    cells <- Cells(obj_subset)[cells]
+  }
+  
+  if (!missing(subset) || !is.null(idents)) {
+    message("Extracting cells matched to `subset` and/or `idents`")
+  }
+  
+  if (class(obj_subset) == "FOV") {
+    message("object class is `FOV` ")
+    cells <- Cells(obj_subset)
+  } else if (!class(obj_subset) == "FOV" && !missing(subset)) {
+    subset <- enquo(arg = subset)
+    # cells to keep in the object
+    cells <-
+      WhichCells(object = obj_subset, 
+                 cells = cells,
+                 idents = idents,
+                 expression = subset,
+                 return.null = TRUE, ...)
+  } else if (!class(obj_subset) == "FOV" && !is.null(idents)) {
+    cells <-
+      WhichCells(object = obj_subset, 
+                 cells = cells,
+                 idents = idents,
+                 return.null = TRUE, ...)
+  } else if (is.null(cells)) {
+    cells <- Cells(obj_subset)
+  }
+  
+  # added support for object class `FOV`
+  if (class(obj_subset) == "FOV") {
+    message("Matching cells for object class `FOV`..")
+    cells_check <- any(obj_subset %>% Cells %in% cells)
+  } else { 
+    # check if cells are present in all FOV
+    message("Matching cells in FOVs..")
+    cells_check <-
+      lapply(Images(obj_subset) %>% seq, 
+             function(i) { 
+               any(obj_subset[[Images(obj_subset)[i]]][["centroids"]] %>% Cells %in% cells) 
+             }) %>% unlist
+  }
+  
+  if (all(cells_check)) { 
+    message("Cell subsets are found in all FOVs!", "\n",
+            "Subsetting object..")
+    base::subset(obj_subset , cells = cells, 
+                                 idents = idents,
+                                 features = features,
+                                 ...)
+    # subset FOVs
+    message("Subsetting FOVs..")
+    fovs <- 
+      lapply(Images(obj_subset) %>% seq, function(i) {
+          base::subset(x = obj_subset[[Images(obj_subset)[i]]],
+                       cells = cells, 
+                       idents = idents, 
+                       features = features, 
+                       ...)
+      })
+    # replace subsetted FOVs
+    for (i in fovs %>% seq) { obj_subset[[Images(object)[i]]] <- fovs[[i]] }
+    
+  } else { 
+    # if cells are present only in one or several FOVs:
+    # subset FOVs
+    fovs <- 
+      lapply(Images(obj_subset) %>% seq, function(i) {
+        if (any(obj_subset[[Images(obj_subset)[i]]][["centroids"]] %>% Cells %in% cells)) {
+          message("Cell subsets are found only in FOV: ", "\n", Images(obj_subset)[i])
+          message("Subsetting Centroids..")
+          base::subset(x = obj_subset[[Images(obj_subset)[i]]],
+                       cells = cells, 
+                       idents = idents, 
+                       features = features, 
+                       ...)
+        }
+      })
+    # remove FOVs with no matching cells
+    message("Removing FOVs where cells are NOT found: ", "\n", 
+            paste0(Images(object)[which(!cells_check == TRUE)], "\n"))
+    # replace subsetted FOVs
+    for (i in fovs %>% seq) { obj_subset[[Images(object)[i]]] <- fovs[[i]] } 
+    
+    # subset final object
+    message("..subset final object")
+    base::subset(obj_subset, cells = cells,
+                   idents = idents,
+                   features = features, 
+                   ...)
+  }
+  
+  if (Update.object && !class(obj_subset) == "FOV") { 
+    message("Updating object..")
+    UpdateSeuratObject(obj_subset) }
+  
+  message("Object is ready!")
+  return(obj_subset)
+  
+}
+```
+
+
+```{r}
+# from https://github.com/alikhuseynov/add-on_R/blob/develop/R/subset_obj_seurat_v2.R?ref=https://githubhelp.com
+
+#' @importFrom magrittr %>% %<>%
+NULL
+
+# TODO:
+  # - edit args
+
+#' Intermediate solution to \code{subset()}:
+#' subset FOVs/centroids if selected cells are NOT found in each FOV
+#' NOTE: some code parts and args are taken from SeuratObject
+
+#' Function params/args:
+#' @param object An S4 object or A \code{FOV} object
+#' @param subset Logical expression indicating features/variables to keep
+#' @param cells A vector of cells to keep; if \code{NULL}, defaults to all cells
+#' @param idents A vector of identity classes to keep
+#' @param Update.slots If to update slots of an object
+#' @param Update.object If to update final object, default to TRUE.
+#' @param ... Arguments passed to \code{subset()} and other methods
+
+
+subset_opt <- function(
+    object = NULL, 
+    subset = NULL, 
+    cells = NULL, 
+    idents = NULL,
+    features = NULL,
+    Update.slots = TRUE,
+    Update.object = TRUE,
+    ...)
+{
+  
+  if (Update.slots) { 
+    message("Updating object slots..")
+    object %<>% UpdateSlots()
+  }
+  
+  message("Cloing object..")
+  obj_subset <- object
+  
+  # sanity check - use only cell ids (no indices)
+  if (all(is.integer(cells))) { 
+    cells <- Cells(obj_subset)[cells]
+  }
+  
+  if (!missing(subset) || !is.null(idents)) {
+    message("Extracting cells matched to `subset` and/or `idents`")
+  }
+  
+  if (class(obj_subset) == "FOV") {
+    message("object class is `FOV` ")
+    cells <- Cells(obj_subset)
+  } else if (!class(obj_subset) == "FOV" && !missing(subset)) {
+    subset <- enquo(arg = subset)
+    # cells to keep in the object
+    cells <-
+      WhichCells(object = obj_subset, 
+                 cells = cells,
+                 idents = idents,
+                 expression = subset,
+                 return.null = TRUE, ...)
+  } else if (!class(obj_subset) == "FOV" && !is.null(idents)) {
+    cells <-
+      WhichCells(object = obj_subset, 
+                 cells = cells,
+                 idents = idents,
+                 return.null = TRUE, ...)
+  } else if (is.null(cells)) {
+    cells <- Cells(obj_subset)
+  }
+  
+  # added support for object class `FOV`
+  if (class(obj_subset) == "FOV") {
+    message("Matching cells for object class `FOV`..")
+    cells_check <- any(obj_subset %>% Cells %in% cells)
+  } else { 
+    # check if cells are present in all FOV
+    message("Matching cells in FOVs..")
+    cells_check <-
+      lapply(Images(obj_subset) %>% seq, 
+             function(i) { 
+               any(obj_subset[[Images(obj_subset)[i]]][["centroids"]] %>% Cells %in% cells) 
+             }) %>% unlist
+  }
+  
+  if (all(cells_check)) { 
+    message("Cell subsets are found in all FOVs!", "\n",
+            "Subsetting object..")
+    obj_subset %<>% base::subset(cells = cells, 
+                                 idents = idents,
+                                 features = features,
+                                 ...)
+    # subset FOVs
+    message("Subsetting FOVs..")
+    fovs <- 
+      lapply(Images(obj_subset) %>% seq, function(i) {
+          base::subset(x = obj_subset[[Images(obj_subset)[i]]],
+                       cells = cells, 
+                       idents = idents, 
+                       features = features, 
+                       ...)
+      })
+    # replace subsetted FOVs
+    for (i in fovs %>% seq) { obj_subset[[Images(object)[i]]] <- fovs[[i]] }
+    
+  } else { 
+    # if cells are present only in one or several FOVs:
+    # subset FOVs
+    fovs <- 
+      lapply(Images(obj_subset) %>% seq, function(i) {
+        if (any(obj_subset[[Images(obj_subset)[i]]][["centroids"]] %>% Cells %in% cells)) {
+          message("Cell subsets are found only in FOV: ", "\n", Images(obj_subset)[i])
+          message("Subsetting Centroids..")
+          base::subset(x = obj_subset[[Images(obj_subset)[i]]],
+                       cells = cells, 
+                       idents = idents, 
+                       features = features, 
+                       ...)
+        }
+      })
+    # remove FOVs with no matching cells
+    message("Removing FOVs where cells are NOT found: ", "\n", 
+            paste0(Images(object)[which(!cells_check == TRUE)], "\n"))
+    # replace subsetted FOVs
+    for (i in fovs %>% seq) { obj_subset[[Images(object)[i]]] <- fovs[[i]] } 
+    
+    # subset final object
+    message("..subset final object")
+    obj_subset %<>% 
+      base::subset(cells = cells,
+                   idents = idents,
+                   features = features, 
+                   ...)
+  }
+  
+  if (Update.object && !class(obj_subset) == "FOV") { 
+    message("Updating object..")
+    obj_subset %<>% UpdateSeuratObject() }
+  
+  message("Object is ready!")
+  return(obj_subset)
+  
+}
+```
+

@@ -1,0 +1,9 @@
+name	folder	time_point	mouse	tissue	dataset
+TOM1	ThomasOttoMouseSlide1060324	TP_N1	m2	spleen	cosmX
+TOM1	ThomasOttoMouseSlide1060324	TP_2	m1	spleen	cosmX
+TOM1	ThomasOttoMouseSlide1060324	TP_2	m1	bone_marrow	cosmX
+TOM2	ThomasOttoMouseSlide2060324	TP_3	m2	spleen	cosmX
+TOM2	ThomasOttoMouseSlide2060324	TP_4	m7	lymph_node	cosmX
+TOM2	ThomasOttoMouseSlide2060324	TP_N1	m2	lymph_node	cosmX
+TOM2	ThomasOttoMouseSlide2060324	TP_4	m2	spleen	cosmX
+TOM2	ThomasOttoMouseSlide2060324	TP_3	m2	bone_marrow	cosmX
